@@ -11,6 +11,15 @@ object KinescopeDemoConfig {
     /** Kinescope API token (Dashboard API, playlist, offline downloads). */
     const val API_KEY = "bc50167b-e868-47e4-a55c-07208ef15b22"
 
+    /** Shorts feed filter — passed to Dashboard `GET /v1/videos?project_id=`. */
+    val PROJECT_ID: String? = ""
+
+    /** Shorts feed filter — passed to Dashboard `GET /v1/videos?folder_id=`. Null = any folder. */
+    val FOLDER_ID: String? = ""
+
+    /** Max videos to load into the Shorts feed (`per_page` for Dashboard catalog). */
+    const val SHORTS_FEED_LIMIT = 100
+
     /** Default VOD — Custom UI, Custom Player, Compose player screens. */
     const val DEFAULT_VIDEO_ID = "b138bf19-72fc-474b-901b-00f323899598"
 

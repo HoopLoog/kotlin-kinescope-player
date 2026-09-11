@@ -18,6 +18,8 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
+import android.view.WindowInsets
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -34,6 +36,8 @@ import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.GestureDetectorCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.children
 import androidx.core.view.isVisible
 import androidx.media3.common.C
@@ -450,6 +454,68 @@ class KinescopePlayerView @JvmOverloads constructor(
     private var doubleTapSeekStreakCount = 0
     private var lastDoubleTapSeekTimeMs = 0L
 
+    /**
+     * How far the title/description block is pushed down to clear the status bar
+     * when this view sits under it (e.g. a sheet sliding the band).
+     */
+    private var chromeTopOverlapPx = 0
+
+    /**
+     * Like [chromeTopOverlapPx] but for the whole system safe area at the top
+     * (status bar and display cutout): what a panel docked to the top edge has
+     * to clear. Fed by the same insets and location.
+     */
+    private var chromeTopSafeInsetPx = 0
+
+    /**
+     * Insets last dispatched to this view — the fallback source, see
+     * [currentWindowInsets] — and the screen Y the overlap was resolved against.
+     */
+    private var lastWindowInsets: WindowInsetsCompat? = null
+    private var chromeTopScreenY = Int.MIN_VALUE
+
+    /**
+     * Where the captions search panel sits while this view is inline (not
+     * fullscreen). [KinescopeCaptionsSearchPlacement.BOTTOM] (default) docks
+     * a fixed-height panel above the control bar;
+     * [KinescopeCaptionsSearchPlacement.TOP] docks it to the top edge and lets
+     * the list fill down to the control bar — for hosts whose player band
+     * changes height (a draggable sheet), so the panel stays put instead of
+     * following the bottom edge. The fullscreen layout is unaffected. Honoured
+     * by every re-sync of the panel: fullscreen toggles, content orientation
+     * changes, view switches, resizes.
+     *
+     * A top-docked panel clears the system safe area at the top (status bar,
+     * display cutout) on its own; [captionsSearchTopInset] adds the host's own
+     * chrome on top of that. While it is up, scrubbing keeps the scrub hint
+     * header and the control overlay under it — they would draw over the
+     * search field otherwise; both come back if the panel closes or the
+     * placement changes mid-scrub.
+     */
+    var captionsSearchPlacement: KinescopeCaptionsSearchPlacement =
+        KinescopeCaptionsSearchPlacement.BOTTOM
+        set(value) {
+            if (field == value) return
+            field = value
+            syncCaptionsSearchFullscreenMode()
+            syncScrubChromePresentation()
+        }
+
+    /**
+     * Extra top inset, in px, for a panel docked to the top
+     * ([KinescopeCaptionsSearchPlacement.TOP]) — the host's own header drawn
+     * over the top of the player band. Added on top of the system safe area,
+     * which the panel clears on its own. Ignored for the bottom placement and
+     * in fullscreen. Negative values are clamped to 0.
+     */
+    var captionsSearchTopInset: Int = 0
+        set(value) {
+            val clamped = value.coerceAtLeast(0)
+            if (field == clamped) return
+            field = clamped
+            updateCaptionsSearchInsets()
+        }
+
     private val hideControlOverlayRunnable = Runnable {
         if (scrubbing || settingsMenuView?.isVisible == true || isCaptionsSearchActive()) {
             return@Runnable
@@ -758,7 +824,7 @@ class KinescopePlayerView @JvmOverloads constructor(
             seekView?.hideSeekFeedback()
             hideVideoSubtitlesForScrub()
             enterScrubOverlayMode()
-            seekView?.showScrubOverlay()
+            syncScrubChromePresentation()
 
             if (isLiveState) {
                 scrubbingLiveDurationCached = activePlaybackPlayer?.duration ?: 0
@@ -1003,10 +1069,7 @@ class KinescopePlayerView @JvmOverloads constructor(
         settingsMenuView?.setFullscreenMode(isVideoFullscreen)
 
         captionsSearchView = findViewById(R.id.captions_search_overlay)
-        captionsSearchView?.setFullscreenMode(
-            fullscreen = isVideoFullscreen,
-            portrait = isPortraitCaptionsSearchLayout(),
-        )
+        syncCaptionsSearchFullscreenMode()
         captionsSearchView?.onSeekToMs = { positionMs ->
             kinescopePlayer?.seekToPosition(positionMs)
             if (isCaptionsSearchActive()) {
@@ -1025,6 +1088,7 @@ class KinescopePlayerView @JvmOverloads constructor(
             } else {
                 restoreControlOverlayAfterCaptionsSearch()
             }
+            syncScrubChromePresentation()
         }
 
         chaptersMenuView = findViewById(R.id.chapters_menu)
@@ -1063,7 +1127,6 @@ class KinescopePlayerView @JvmOverloads constructor(
             if ((widthChanged || heightChanged) && width > 0 && height > 0) {
                 syncCaptionsSearchFullscreenMode()
                 applySubtitleStyle()
-                updateCaptionsSearchInsets()
             }
         }
         setUIListeners()
@@ -1756,9 +1819,94 @@ class KinescopePlayerView @JvmOverloads constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        addOnLayoutChangeListener(chromeTopOverlapLayoutListener)
+        viewTreeObserver.addOnPreDrawListener(screenPositionPreDrawListener)
+        updateChromeTopOverlap(currentWindowInsets())
         applyPlayerChromeLayout()
         updateAll()
         refreshCaptionsSearchChrome()
+    }
+
+    override fun onDetachedFromWindow() {
+        removeOnLayoutChangeListener(chromeTopOverlapLayoutListener)
+        viewTreeObserver.removeOnPreDrawListener(screenPositionPreDrawListener)
+        super.onDetachedFromWindow()
+    }
+
+    private val chromeTopOverlapLayoutListener =
+        OnLayoutChangeListener { _, _, top, _, _, _, oldTop, _, _ ->
+            if (top != oldTop) {
+                updateChromeTopOverlap(currentWindowInsets())
+            }
+        }
+
+    /**
+     * A translated view, or one inside a scrolled ancestor, moves on screen
+     * without a layout of its own (the player band riding a sheet). The
+     * overlap is re-read when the screen position changes — one location
+     * read per frame, nothing more while the view stays put.
+     */
+    private val screenPositionPreDrawListener = ViewTreeObserver.OnPreDrawListener {
+        if (screenY() != chromeTopScreenY) {
+            updateChromeTopOverlap(currentWindowInsets())
+        }
+        true
+    }
+
+    /**
+     * The insets the overlap is read from: the root's, raw. The formula in
+     * [updateChromeTopOverlap] is a screen one, and the status bar sits where
+     * it sits no matter what an ancestor consumed on the way down — a host
+     * padding its own toolbar and passing the rest on with the bar zeroed
+     * would otherwise leave the band blind to the bar it slides under with
+     * the sheet. The insets last dispatched to this view stand in where there
+     * are no root insets to read (before API 23, or detached).
+     */
+    private fun currentWindowInsets(): WindowInsetsCompat? {
+        return ViewCompat.getRootWindowInsets(this) ?: lastWindowInsets
+    }
+
+    /** Reused across pre-draw checks: they run every frame. */
+    private val screenLocation = IntArray(2)
+
+    private fun screenY(): Int {
+        getLocationOnScreen(screenLocation)
+        return screenLocation[1]
+    }
+
+    /**
+     * The overlap is read on the dispatch path rather than through a listener
+     * on this view: that listener slot is the host's (a host setting its own
+     * would silently replace ours, or we theirs). super still routes the
+     * insets to the host's listener, if any, and down to the children. What
+     * arrives here is the signal that the insets changed, and the fallback
+     * source; the overlap itself comes from [currentWindowInsets].
+     */
+    override fun dispatchApplyWindowInsets(insets: WindowInsets): WindowInsets {
+        lastWindowInsets = WindowInsetsCompat.toWindowInsetsCompat(insets, this)
+        updateChromeTopOverlap(currentWindowInsets())
+        return super.dispatchApplyWindowInsets(insets)
+    }
+
+    private fun updateChromeTopOverlap(insets: WindowInsetsCompat?) {
+        insets ?: return
+        val statusBarBottom = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+        val safeAreaBottom = insets.getInsets(
+            WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout(),
+        ).top
+        // Screen coordinates, not window coordinates: in a decor-fitted (non
+        // edge-to-edge) window the content already starts below the status bar
+        // yet sits at window Y=0, which would fake a full-bar overlap. The
+        // status bar itself is always anchored to screen Y=0.
+        val screenY = screenY()
+        chromeTopScreenY = screenY
+        val overlap = (statusBarBottom - screenY).coerceAtLeast(0)
+        val safeInset = (safeAreaBottom - screenY).coerceAtLeast(0)
+        if (overlap != chromeTopOverlapPx || safeInset != chromeTopSafeInsetPx) {
+            chromeTopOverlapPx = overlap
+            chromeTopSafeInsetPx = safeInset
+            applyPlayerChromeLayout()
+        }
     }
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
@@ -1785,17 +1933,12 @@ class KinescopePlayerView @JvmOverloads constructor(
         seekView?.setFullscreenMode(value)
         settingsMenuView?.setFullscreenMode(value)
         chaptersMenuView?.setFullscreenMode(value)
-        captionsSearchView?.setFullscreenMode(
-            value,
-            portrait = isPortraitCaptionsSearchLayout(fullscreen = value),
-        )
+        syncCaptionsSearchFullscreenMode()
         applyPlayerChromeLayout()
         updateFullscreenButton()
         updatePlayPauseButton()
         applySubtitleStyle()
-        if (isCaptionsSearchActive()) {
-            updateCaptionsSearchInsets()
-        }
+        syncScrubChromePresentation()
     }
 
     private fun updateContentOrientation(width: Int, height: Int) {
@@ -2040,7 +2183,7 @@ class KinescopePlayerView @JvmOverloads constructor(
         descriptionBlock?.let { block ->
             (block.layoutParams as? MarginLayoutParams)?.let { params ->
                 params.marginStart = horizontalMargin
-                params.topMargin = horizontalMargin
+                params.topMargin = horizontalMargin + chromeTopOverlapPx
                 block.layoutParams = params
             }
         }
@@ -2652,6 +2795,12 @@ class KinescopePlayerView @JvmOverloads constructor(
     }
 
     private fun animateCompactOptionsBarExpand() {
+        // Re-entered through post(); the bar may have been collapsed meanwhile
+        // (overlay fade end, chrome mode change, view switch) — see the same
+        // guard in the deferred pass below.
+        if (!isOptionsBarExpanded) {
+            return
+        }
         cancelCompactOptionsBarTransition()
         updateExpandedButtonsChildVisibility()
 
@@ -2671,6 +2820,13 @@ class KinescopePlayerView @JvmOverloads constructor(
 
         (controlBar as? ViewGroup)?.requestLayout()
         controlBar?.post {
+            // Whoever collapsed the bar since the tap has already restored the
+            // progress chrome; finishing the expansion here would hide the
+            // progress row and the timer on a bar that is no longer expanded
+            // (the strip target measures 0 with its buttons gone).
+            if (!isOptionsBarExpanded) {
+                return@post
+            }
             val progressStartWidth = if (progressContainer?.isVisible == true) {
                 progressContainer?.width ?: 0
             } else {
@@ -2985,6 +3141,33 @@ class KinescopePlayerView @JvmOverloads constructor(
     }
 
     private fun isCaptionsSearchActive(): Boolean = captionsSearchView?.isVisible == true
+
+    /** Inline, top-docked: the panel owns the top edge — where the scrub hint header draws. */
+    private fun isCaptionsSearchPinnedToTop(): Boolean {
+        return !isVideoFullscreen && captionsSearchPlacement == KinescopeCaptionsSearchPlacement.TOP
+    }
+
+    /**
+     * Scrub chrome: the hint header along the top edge and the overlay lifted
+     * above the captions search panel (so the scaled seek bar stays visible
+     * over a bottom panel). Off while a top-docked panel is up — the header
+     * would draw over the search field and the overlay, opaque in the wide
+     * chrome, would cover the panel. Decided on scrub start and again
+     * whenever that changes mid-scrub: panel shown or closed, placement or
+     * fullscreen switched.
+     */
+    private fun syncScrubChromePresentation() {
+        if (!scrubbing) {
+            return
+        }
+        if (isCaptionsSearchActive() && isCaptionsSearchPinnedToTop()) {
+            seekView?.hideScrubOverlay()
+            controlView?.elevation = controlElevationBeforeScrub
+        } else {
+            seekView?.showScrubOverlay()
+            controlView?.elevation = SCRUB_MODE_CONTROL_ELEVATION_DP * resources.displayMetrics.density
+        }
+    }
 
     private fun pinsExpandedOptionsToBarEnd(): Boolean {
         return usesCompactOptionsChrome() && isOptionsBarExpanded
@@ -3361,6 +3544,22 @@ class KinescopePlayerView @JvmOverloads constructor(
         if (!usesCompactOptionsChrome()) {
             return
         }
+        // The dots stay clickable while the overlay fades out (auto-hide, tap on
+        // the video). Left alone, the fade's end action hides the overlay and
+        // force-collapses the bar right after this toggle — the tap looks
+        // swallowed: no strip, chrome gone. A press that lands during the fade
+        // and is released after it arrives here later still: the overlay is
+        // already hidden and the flag cleared, and the strip would expand on
+        // hidden chrome — the next tap on the video raises the overlay with the
+        // strip open instead of the progress row. A tap on a control means
+        // "keep the chrome": raise it before toggling.
+        if (controlOverlayHiding || !isControlOverlayVisible()) {
+            showControlOverlay(animated = false)
+            // PiP owns its chrome: nothing to expand on.
+            if (!isControlOverlayVisible()) {
+                return
+            }
+        }
         if (settingsMenuView?.isVisible == true) {
             settingsMenuView?.dismiss()
         }
@@ -3718,9 +3917,7 @@ class KinescopePlayerView @JvmOverloads constructor(
         }
         seekView?.isVisible = true
 
-        val density = resources.displayMetrics.density
         controlElevationBeforeScrub = controlView?.elevation ?: 0f
-        controlView?.elevation = SCRUB_MODE_CONTROL_ELEVATION_DP * density
 
         timeBar?.let { bar ->
             bar.setScrubVisualExpanded(expanded = true)
@@ -3793,13 +3990,17 @@ class KinescopePlayerView @JvmOverloads constructor(
         }
         val overlay = controlView ?: return
         controlOverlayHiding = false
+        // A hide fade may already be running without having rendered a frame
+        // yet (alpha still 1): cancel it before the fully-visible fast path,
+        // otherwise its end action would still hide the overlay and collapse
+        // the options bar right after this call.
+        overlay.animate().cancel()
         if (overlay.isVisible && overlay.alpha >= 1f) {
             updateAll()
             applySubtitleStyle()
             scheduleControlOverlayAutoHide()
             return
         }
-        overlay.animate().cancel()
         overlay.isVisible = true
         updateMobileBackgroundGradients(animated = animated, controlsVisible = true)
         applySubtitleStyle(controlsVisibleOverride = true)
@@ -4282,7 +4483,11 @@ class KinescopePlayerView @JvmOverloads constructor(
                 Gravity.BOTTOM
             }
             layoutParams.bottomMargin = barHeight + bar.paddingBottom
-            layoutParams.topMargin = 0
+            layoutParams.topMargin = if (isCaptionsSearchPinnedToTop()) {
+                chromeTopSafeInsetPx + captionsSearchTopInset
+            } else {
+                0
+            }
             layoutParams.marginStart = 0
             layoutParams.marginEnd = 0
             searchView.layoutParams = layoutParams
@@ -4940,11 +5145,18 @@ class KinescopePlayerView @JvmOverloads constructor(
         return isPortraitContent
     }
 
+    /**
+     * The one place the panel learns its layout — mode, pin and the margins
+     * that go with them; every re-sync path goes through here.
+     */
     private fun syncCaptionsSearchFullscreenMode() {
-        captionsSearchView?.setFullscreenMode(
+        val search = captionsSearchView ?: return
+        search.setFullscreenMode(
             fullscreen = isVideoFullscreen,
             portrait = isPortraitCaptionsSearchLayout(),
         )
+        search.setPinnedToTop(captionsSearchPlacement == KinescopeCaptionsSearchPlacement.TOP)
+        updateCaptionsSearchInsets()
     }
 
     private fun resolveSubtitleBottomPaddingPx(
