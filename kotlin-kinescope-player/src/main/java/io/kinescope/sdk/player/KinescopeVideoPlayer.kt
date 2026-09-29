@@ -292,7 +292,7 @@ class KinescopeVideoPlayer(
         val drmAuthToken = kinescopePlayerOptions.drmAuthToken?.takeIf { it.isNotBlank() }
         val accessCookie = kinescopePlayerOptions.accessToken?.takeIf { it.isNotBlank() }
             ?.let { "${KinescopeVideoAccess.ACCESS_COOKIE}=$it" }
-        fetch.getVideo(videoId = videoId, drmAuthToken = drmAuthToken, cookie = accessCookie)
+        fetch.getVideoWithCookie(videoId = videoId, cookie = accessCookie, drmAuthToken = drmAuthToken)
             .enqueue(object : Callback<KinescopeVideo> {
             override fun onResponse(
                 call: Call<KinescopeVideo>,

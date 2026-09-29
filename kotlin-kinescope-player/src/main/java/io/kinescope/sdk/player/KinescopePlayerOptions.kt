@@ -45,10 +45,14 @@ data class KinescopePlayerOptions(
      * playback can use your access-check endpoint instead of leaving the video public.
      */
     var drmAuthToken: String? = null,
+) {
     /**
      * Viewer token for videos restricted by "who can watch", sent as the
      * [io.kinescope.sdk.api.KinescopeVideoAccess.ACCESS_COOKIE] cookie with `{videoId}.json`.
      * Get it with [io.kinescope.sdk.api.KinescopeVideoAccess.authorizeWithPassword].
+     *
+     * Declared outside the primary constructor on purpose: adding a constructor parameter would
+     * change the JVM signatures of the constructor and `copy` for apps compiled against 0.1.17.
      */
-    var accessToken: String? = null,
-)
+    var accessToken: String? = null
+}
