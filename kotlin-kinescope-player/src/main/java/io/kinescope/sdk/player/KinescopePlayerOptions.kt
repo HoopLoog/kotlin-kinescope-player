@@ -45,4 +45,10 @@ data class KinescopePlayerOptions(
      * playback can use your access-check endpoint instead of leaving the video public.
      */
     var drmAuthToken: String? = null,
+    /**
+     * Viewer token for videos restricted by "who can watch", sent as the
+     * [io.kinescope.sdk.api.KinescopeVideoAccess.ACCESS_COOKIE] cookie with `{videoId}.json`.
+     * Get it with [io.kinescope.sdk.api.KinescopeVideoAccess.authorizeWithPassword].
+     */
+    var accessToken: String? = null,
 )

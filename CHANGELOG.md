@@ -1,8 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.18] — unreleased
+
+### Added
+- **Restricted videos** — `loadVideo` reports `KinescopeVideoAccessException.AuthRequired(authType)` when "who can watch" limits the video (the server answers with an HTML access page, which used to fail as a JSON parse error) and `Forbidden` on HTTP 403; `KinescopeVideoAccess.authorizeWithPassword` exchanges the video password for a viewer token passed via `KinescopePlayerOptions.accessToken`
 
 ### Fixed
+- **Config request logging** — `Cookie` / `Set-Cookie` are redacted in the `{videoId}.json` HTTP log
 - **Cast overlay never shown** — `android:id` on the `<include>` renamed the overlay root, so `findViewById(R.id.kinescope_cast_overlay)` was `null`
 - **Cast receiver load** — manifests are sent as `application/dash+xml` / `application/x-mpegurl` (was `video/mp4`); HLS is flagged as fMP4 (CMAF); the Widevine license is sent only for DRM videos (from `drm.widevine.licenseUrl`), including HLS
 - **Cast overlay chrome** — no local buffering spinner over the overlay; seek bar track visible; replay icon after the receiver finishes, and play reloads finished media

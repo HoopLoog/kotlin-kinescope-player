@@ -30,6 +30,7 @@
 | `showDefaultPoster` | `true` | Built-in `default_poster` when the video has no poster URL |
 | `showLiveAwaitingCover` | `true` | Built-in `live_awaiting_cover` while a live broadcast has not started |
 | `drmAuthToken` | `null` | Authorization Backend token (`drmauthtoken`) sent with `{videoId}.json` on `loadVideo` |
+| `accessToken` | `null` | Viewer token for videos restricted by "who can watch", sent as the `kinescope-user` cookie with `{videoId}.json`; see [Restricted videos](#restricted-videos) |
 | `referer` | `https://kinescope.io/` | HTTP `Referer` for metadata / DRM requests (must match domain restrictions in the dashboard) |
 
 Chrome icons (play, seek bar, PiP, fullscreen, …) vs settings popup items (Quality, Speed, …) are documented separately: [Player chrome](player-chrome.md), [Settings menu](settings-menu.md).
@@ -96,3 +97,21 @@ kinescopePlayer.bindLifecycle(
 ```
 
 `onDestroy` calls `release()` automatically. Use `unbindLifecycle()` if you detach the player earlier.
+
+## Restricted videos
+
+When a video is restricted by "who can watch", `{videoId}.json` answers with an access page instead of the config, and `loadVideo` calls `onFailed` with `KinescopeVideoAccessException.AuthRequired(authType)` (`PASSWORD`, `EMAIL`, `SSO`, `UNIQUE_CODE`). A player that is not allowed on the sent `Referer` gets `KinescopeVideoAccessException.Forbidden`.
+
+A password-protected video can be opened without the viewer:
+
+```kotlin
+KinescopeVideoAccess.authorizeWithPassword(videoId, password) { result ->
+    result.onSuccess { token ->
+        kinescopePlayer.kinescopePlayerOptions.accessToken = token
+        kinescopePlayer.loadVideo(videoId)
+    }
+    result.onFailure { error -> /* KinescopeVideoAccessException.WrongPassword or IOException */ }
+}
+```
+
+The token is a short-lived JWT bound to that video; keep it in memory only. Email, SSO and unique codes need the viewer (a code from the mailbox or a browser login) and are not wrapped by the SDK.

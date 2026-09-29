@@ -21,6 +21,8 @@ import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import io.kinescope.sdk.api.KinescopeFetch
+import io.kinescope.sdk.api.KinescopeVideoAccess
+import io.kinescope.sdk.api.KinescopeVideoAccessException
 import io.kinescope.sdk.logger.KinescopeLogger
 import io.kinescope.sdk.logger.KinescopeLoggerLevel
 import io.kinescope.sdk.models.videos.KinescopeVideo
@@ -288,7 +290,9 @@ class KinescopeVideoPlayer(
         onFailed: ((t: Throwable?) -> Unit)? = null,
     ) {
         val drmAuthToken = kinescopePlayerOptions.drmAuthToken?.takeIf { it.isNotBlank() }
-        fetch.getVideo(videoId = videoId, drmAuthToken = drmAuthToken)
+        val accessCookie = kinescopePlayerOptions.accessToken?.takeIf { it.isNotBlank() }
+            ?.let { "${KinescopeVideoAccess.ACCESS_COOKIE}=$it" }
+        fetch.getVideo(videoId = videoId, drmAuthToken = drmAuthToken, cookie = accessCookie)
             .enqueue(object : Callback<KinescopeVideo> {
             override fun onResponse(
                 call: Call<KinescopeVideo>,
@@ -306,7 +310,9 @@ class KinescopeVideoPlayer(
                         KinescopeLoggerLevel.NETWORK,
                         "LoadVideo isSuccessful false"
                     )
-                    onFailed?.invoke(null)
+                    onFailed?.invoke(
+                        if (response.code() == 403) KinescopeVideoAccessException.Forbidden(403) else null,
+                    )
                 }
             }
 
